@@ -41,6 +41,7 @@ pub mod hardware_memory_read;
 pub mod http_request;
 pub mod image_info;
 pub mod mcp_client;
+pub mod mcp_deferred;
 pub mod mcp_protocol;
 pub mod mcp_tool;
 pub mod mcp_transport;
@@ -48,6 +49,7 @@ pub mod memory_forget;
 pub mod memory_recall;
 pub mod memory_store;
 pub mod model_routing_config;
+pub mod node_tool;
 pub mod pdf_read;
 pub mod proxy_config;
 pub mod pushover;
@@ -55,6 +57,7 @@ pub mod schedule;
 pub mod schema;
 pub mod screenshot;
 pub mod shell;
+pub mod tool_search;
 pub mod traits;
 pub mod web_fetch;
 pub mod web_search_tool;
@@ -84,11 +87,14 @@ pub use hardware_memory_read::HardwareMemoryReadTool;
 pub use http_request::HttpRequestTool;
 pub use image_info::ImageInfoTool;
 pub use mcp_client::McpRegistry;
+pub use mcp_deferred::{ActivatedToolSet, DeferredMcpToolSet};
 pub use mcp_tool::McpToolWrapper;
 pub use memory_forget::MemoryForgetTool;
 pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
 pub use model_routing_config::ModelRoutingConfigTool;
+#[allow(unused_imports)]
+pub use node_tool::NodeTool;
 pub use pdf_read::PdfReadTool;
 pub use proxy_config::ProxyConfigTool;
 pub use pushover::PushoverTool;
@@ -97,6 +103,7 @@ pub use schedule::ScheduleTool;
 pub use schema::{CleaningStrategy, SchemaCleanr};
 pub use screenshot::ScreenshotTool;
 pub use shell::ShellTool;
+pub use tool_search::ToolSearchTool;
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};
@@ -377,6 +384,7 @@ pub fn all_tools_with_runtime(
                 reasoning_enabled: root_config.runtime.reasoning_enabled,
                 provider_timeout_secs: Some(root_config.provider_timeout_secs),
                 extra_headers: root_config.extra_headers.clone(),
+                api_path: root_config.api_path.clone(),
             },
         )
         .with_parent_tools(Arc::clone(&parent_tools))
