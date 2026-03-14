@@ -713,6 +713,46 @@ pub struct ToolFilterGroup {
     pub keywords: Vec<String>,
 }
 
+/// Configuration for splitting AI responses into multiple messages.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct MultiMessageConfig {
+    /// Marker the AI inserts to split its response into separate messages.
+    /// Empty string disables the feature. Example: `"[BREAK]"`.
+    #[serde(default)]
+    pub break_marker: String,
+
+    /// Minimum delay in milliseconds between consecutive message parts. Default: `500`.
+    #[serde(default = "default_human_delay_min_ms")]
+    pub human_delay_ms: u64,
+
+    /// Maximum delay in milliseconds between consecutive message parts. Default: `2000`.
+    /// Actual delay is random in [human_delay_ms, human_delay_max_ms], weighted by part length.
+    #[serde(default = "default_human_delay_max_ms")]
+    pub human_delay_max_ms: u64,
+
+    /// When true, merge adjacent segments shorter than `coalesce_min_chars` with the next.
+    /// Default: `false`.
+    #[serde(default)]
+    pub coalesce_short_messages: bool,
+
+    /// Minimum character count for a segment; shorter ones are merged when coalescing.
+    /// Default: `80`.
+    #[serde(default = "default_multi_message_coalesce_min_chars")]
+    pub coalesce_min_chars: usize,
+}
+
+fn default_human_delay_min_ms() -> u64 {
+    500
+}
+
+fn default_human_delay_max_ms() -> u64 {
+    2000
+}
+
+fn default_multi_message_coalesce_min_chars() -> usize {
+    80
+}
+
 /// Agent orchestration configuration (`[agent]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentConfig {
@@ -742,6 +782,11 @@ pub struct AgentConfig {
     /// Default: `[]` (no filtering — all tools included).
     #[serde(default)]
     pub tool_filter_groups: Vec<ToolFilterGroup>,
+
+    /// Multi-message splitting: instruct the AI to use a marker (e.g. `[BREAK]`) to
+    /// split its response into separate messages with optional pauses and coalescing.
+    #[serde(default)]
+    pub multi_message: MultiMessageConfig,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -766,6 +811,7 @@ impl Default for AgentConfig {
             tool_dispatcher: default_agent_tool_dispatcher(),
             tool_call_dedup_exempt: Vec::new(),
             tool_filter_groups: Vec::new(),
+            multi_message: MultiMessageConfig::default(),
         }
     }
 }

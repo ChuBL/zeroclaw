@@ -1,3 +1,14 @@
+## Changelog
+
+### 2026-03-14
+
+- **feat(channels): multi-message response splitting** — Added `MultiMessageConfig` under `[agent.multi_message]`. Set a `break_marker` (e.g. `[BREAK]`) and the agent will split its response into separate messages with configurable human-like delays (`human_delay_ms` / `human_delay_max_ms`). Short segments can be coalesced via `coalesce_short_messages` + `coalesce_min_chars`. New module: `src/channels/response_splitter.rs`.
+- **fix(agent): Unicode-safe argument truncation** — `execute_one_tool` now truncates tool argument summaries at a UTF-8 character boundary instead of a raw byte offset, preventing panics on multibyte characters.
+- **fix(channels): Unicode-safe string truncation in observer** — `ChannelNotifyObserver` tool-call notifications now use a shared `truncate_to_bytes` helper that respects UTF-8 boundaries.
+- **feat(telegram): add 🥰 to ACK reactions** — `TELEGRAM_ACK_REACTIONS` gains a new reaction emoji.
+
+---
+
 <p align="center">
   <img src="docs/assets/zeroclaw.png" alt="ZeroClaw" width="200" />
 </p>

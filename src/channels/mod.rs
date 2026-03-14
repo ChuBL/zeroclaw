@@ -34,6 +34,7 @@ pub mod qq;
 pub mod signal;
 pub mod slack;
 pub mod telegram;
+pub mod response_splitter;
 pub mod traits;
 pub mod transcription;
 pub mod tts;
@@ -97,6 +98,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
+fn truncate_to_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Observer wrapper that forwards tool-call events to a channel sender
 /// for real-time threaded notifications.
 struct ChannelNotifyObserver {
@@ -113,9 +125,9 @@ impl Observer for ChannelNotifyObserver {
                 Some(args) if !args.is_empty() => {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
                         if let Some(cmd) = v.get("command").and_then(|c| c.as_str()) {
-                            format!(": `{}`", if cmd.len() > 200 { &cmd[..200] } else { cmd })
+                            format!(": `{}`", truncate_to_bytes(cmd, 200))
                         } else if let Some(q) = v.get("query").and_then(|c| c.as_str()) {
-                            format!(": {}", if q.len() > 200 { &q[..200] } else { q })
+                            format!(": {}", truncate_to_bytes(q, 200))
                         } else if let Some(p) = v.get("path").and_then(|c| c.as_str()) {
                             format!(": {p}")
                         } else if let Some(u) = v.get("url").and_then(|c| c.as_str()) {
@@ -123,7 +135,7 @@ impl Observer for ChannelNotifyObserver {
                         } else {
                             let s = args.to_string();
                             if s.len() > 120 {
-                                format!(": {}…", &s[..120])
+                                format!(": {}…", truncate_to_bytes(&s, 120))
                             } else {
                                 format!(": {s}")
                             }
@@ -131,7 +143,7 @@ impl Observer for ChannelNotifyObserver {
                     } else {
                         let s = args.to_string();
                         if s.len() > 120 {
-                            format!(": {}…", &s[..120])
+                            format!(": {}…", truncate_to_bytes(&s, 120))
                         } else {
                             format!(": {s}")
                         }
@@ -296,6 +308,7 @@ struct ChannelRuntimeContext {
     tool_call_dedup_exempt: Arc<Vec<String>>,
     model_routes: Arc<Vec<crate::config::ModelRouteConfig>>,
     ack_reactions: bool,
+    multi_message: crate::config::MultiMessageConfig,
 }
 
 #[derive(Clone)]
@@ -498,6 +511,7 @@ fn build_channel_system_prompt(
     base_prompt: &str,
     channel_name: &str,
     reply_target: &str,
+    multi_message: &crate::config::MultiMessageConfig,
 ) -> String {
     let mut prompt = base_prompt.to_string();
 
@@ -537,6 +551,19 @@ fn build_channel_system_prompt(
              reaches the user."
         );
         prompt.push_str(&context);
+    }
+
+    if !multi_message.break_marker.is_empty() {
+        let instruction = format!(
+            "\n\n## Multi-Message Responses\n\n\
+             When your response benefits from being delivered as separate messages \
+             (e.g., distinct topics, step-by-step instructions, long explanations), \
+             insert `{}` on its own line where you want the split to occur. \
+             Each segment is sent as a separate message with a natural pause between them. \
+             Only split when it meaningfully improves readability — do not over-split.",
+            multi_message.break_marker
+        );
+        prompt.push_str(&instruction);
     }
 
     prompt
@@ -1810,8 +1837,12 @@ async fn process_channel_message(
         }
     }
 
-    let system_prompt =
-        build_channel_system_prompt(ctx.system_prompt.as_str(), &msg.channel, &msg.reply_target);
+    let system_prompt = build_channel_system_prompt(
+        ctx.system_prompt.as_str(),
+        &msg.channel,
+        &msg.reply_target,
+        &ctx.multi_message,
+    );
     let mut history = vec![ChatMessage::system(system_prompt)];
     history.extend(prior_turns);
     let use_streaming = target_channel
@@ -2134,27 +2165,64 @@ async fn process_channel_message(
                 truncate_with_ellipsis(&delivered_response, 80)
             );
             if let Some(channel) = target_channel.as_ref() {
-                if let Some(ref draft_id) = draft_message_id {
+                let parts = response_splitter::split_response(
+                    &delivered_response,
+                    &ctx.multi_message,
+                );
+                let min_delay = ctx.multi_message.human_delay_ms;
+                let max_delay = ctx.multi_message.human_delay_max_ms;
+                tracing::info!(
+                    break_marker = %ctx.multi_message.break_marker,
+                    human_delay_ms = min_delay,
+                    human_delay_max_ms = max_delay,
+                    parts = parts.len(),
+                    "multi_message dispatch"
+                );
+
+                for (i, part) in parts.iter().enumerate() {
+                    if i > 0 && max_delay > 0 {
+                        let delay_ms = response_splitter::human_delay_ms(part, min_delay, max_delay);
+                        tracing::debug!(part_chars = part.chars().count(), delay_ms, "multi_message part delay");
+                        // Show typing indicator while "composing" the next part,
+                        // then pause — this is what makes the delay visible on Telegram.
+                        let _ = channel.start_typing(&msg.reply_target).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        let _ = channel.stop_typing(&msg.reply_target).await;
+                    }
+
+                    if i == 0 {
+                        if let Some(ref draft_id) = draft_message_id {
+                            if let Err(e) = channel
+                                .finalize_draft(&msg.reply_target, draft_id, part)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to finalize draft: {e}; sending as new message"
+                                );
+                                let _ = channel
+                                    .send(
+                                        &SendMessage::new(part, &msg.reply_target)
+                                            .in_thread(msg.thread_ts.clone()),
+                                    )
+                                    .await;
+                            }
+                            continue;
+                        }
+                    }
+
                     if let Err(e) = channel
-                        .finalize_draft(&msg.reply_target, draft_id, &delivered_response)
+                        .send(
+                            &SendMessage::new(part, &msg.reply_target)
+                                .in_thread(msg.thread_ts.clone()),
+                        )
                         .await
                     {
-                        tracing::warn!("Failed to finalize draft: {e}; sending as new message");
-                        let _ = channel
-                            .send(
-                                &SendMessage::new(&delivered_response, &msg.reply_target)
-                                    .in_thread(msg.thread_ts.clone()),
-                            )
-                            .await;
+                        eprintln!(
+                            "  ❌ Failed to send part {} on {}: {e}",
+                            i + 1,
+                            channel.name()
+                        );
                     }
-                } else if let Err(e) = channel
-                    .send(
-                        &SendMessage::new(delivered_response, &msg.reply_target)
-                            .in_thread(msg.thread_ts.clone()),
-                    )
-                    .await
-                {
-                    eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
                 }
             }
         }
@@ -3706,6 +3774,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         tool_call_dedup_exempt: Arc::new(config.agent.tool_call_dedup_exempt.clone()),
         model_routes: Arc::new(config.model_routes.clone()),
         ack_reactions: config.channels_config.ack_reactions,
+        multi_message: config.agent.multi_message.clone(),
     });
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
@@ -3969,6 +4038,7 @@ mod tests {
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             ack_reactions: true,
+            multi_message: crate::config::MultiMessageConfig::default(),
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -4021,6 +4091,7 @@ mod tests {
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             ack_reactions: true,
+            multi_message: crate::config::MultiMessageConfig::default(),
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -4076,6 +4147,7 @@ mod tests {
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             ack_reactions: true,
+            multi_message: crate::config::MultiMessageConfig::default(),
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));

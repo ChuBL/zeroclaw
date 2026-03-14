@@ -2072,7 +2072,8 @@ async fn execute_one_tool(
     let args_summary = {
         let raw = call_arguments.to_string();
         if raw.len() > 300 {
-            format!("{}…", &raw[..300])
+            let boundary = raw.char_indices().map(|(i, _)| i).filter(|&i| i <= 300).last().unwrap_or(0);
+            format!("{}…", &raw[..boundary])
         } else {
             raw
         }
