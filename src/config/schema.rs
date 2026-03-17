@@ -3322,6 +3322,9 @@ pub struct TelegramConfig {
     /// Direct messages are always processed.
     #[serde(default)]
     pub mention_only: bool,
+    /// When true, ignore photo and document attachments — process text messages only.
+    #[serde(default)]
+    pub text_only: bool,
 }
 
 impl ChannelConfig for TelegramConfig {
